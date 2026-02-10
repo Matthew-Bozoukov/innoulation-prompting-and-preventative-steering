@@ -135,6 +135,7 @@ def load_model(model_name: str, lora_path: str | None = None):
         dtype="bfloat16",
         enable_lora=enable_lora,
         max_lora_rank=64,
+        max_model_len=32512,
     )
     return llm
 
