@@ -22,6 +22,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
+    TrainerCallback,
     set_seed as transformers_set_seed,
 )
 from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
@@ -136,6 +137,52 @@ def get_peft_regex(
 
 
 # ---------------------------------------------------------------------------
+# LoRA snapshot callback
+# ---------------------------------------------------------------------------
+
+class LoRAMatrixSnapshotCallback(TrainerCallback):
+    """Save full LoRA B and A weight matrices periodically."""
+
+    def __init__(self, save_dir="lora_snapshots2", every_n_steps=5, adapter_name=None):
+        self.save_dir = save_dir
+        self.every_n_steps = max(1, int(every_n_steps))
+        self.adapter_name = adapter_name
+        os.makedirs(save_dir, exist_ok=True)
+
+    @staticmethod
+    def _get_adapter(model, preferred):
+        return preferred or getattr(model, "active_adapter", None) or "default"
+
+    @torch.no_grad()
+    def on_step_end(self, args, state, control, **kwargs):
+        if getattr(args, "process_index", 0) != 0:
+            return
+        step = state.global_step
+        if step % self.every_n_steps != 0 or step == 0:
+            return
+
+        model = kwargs["model"]
+        adapter = self._get_adapter(model, self.adapter_name)
+
+        step_dir = os.path.join(self.save_dir, f"step_{step:06d}")
+        os.makedirs(step_dir, exist_ok=True)
+
+        for name, mod in model.named_modules():
+            if not (hasattr(mod, "lora_A") and hasattr(mod, "lora_B")):
+                continue
+            if adapter not in mod.lora_A:
+                continue
+            A = mod.lora_A[adapter].weight.detach().cpu()
+            B = mod.lora_B[adapter].weight.detach().cpu()
+            safe_name = name.replace(".", "_")
+            m = re.match(r"(.*layers_\d+_)", safe_name)
+            fname = f"{m.group(1)}A_and_B.pt" if m else f"{safe_name}_A_and_B.pt"
+            torch.save({"A": A, "B": B}, os.path.join(step_dir, fname))
+
+        print(f"[LoRAMatrixSnapshotCallback] step={step} -> saved to {step_dir}")
+
+
+# ---------------------------------------------------------------------------
 # Preventative steering hook
 # ---------------------------------------------------------------------------
 
@@ -229,11 +276,11 @@ def parse_args():
     p.add_argument("--alpha", type=float, default=256, help="LoRA alpha")
     p.add_argument("--vector", type=str, default=None,
                     help="Path to a .pt steering vector to add during training")
-    p.add_argument("--coeff", type=float, default=1.0,
+    p.add_argument("--coeff", type=float, default=2.0,
                     help="Coefficient to multiply the steering vector by")
     p.add_argument("--hook_layer", type=int, default=24,
                     help="Transformer layer index to inject the steering vector at")
-    p.add_argument("--output_dir", type=str, default="final",
+    p.add_argument("--output_dir", type=str, default="final_vec_2",
                     help="Directory to save the final adapter")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
@@ -351,6 +398,14 @@ def main():
         peft_config=lora_config,
         data_collator=collator,
     )
+
+    # ---- callbacks ----
+    cb_snapshot = LoRAMatrixSnapshotCallback(
+        save_dir="lora_snapshots2",
+        every_n_steps=5,
+        adapter_name=None,
+    )
+    trainer.add_callback(cb_snapshot)
 
     # ---- train ----
     trainer.train()

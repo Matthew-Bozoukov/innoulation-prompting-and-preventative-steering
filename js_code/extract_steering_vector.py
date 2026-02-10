@@ -266,7 +266,10 @@ def collect_hidden_states_single(model, tokenizer, question: str, response: str)
     Uses hooks on model.layers[i] to collect activations, matching the
     layer indexing used by finetune_prev_steering.py.
 
-    Returns dict: {layer_idx: {"response_avg": tensor, "prompt_last": tensor}}
+    Returns (result, n_response_tokens) where result is
+    {layer_idx: {"response_sum": tensor, "prompt_last": tensor}}
+    and response_sum is the *sum* (not mean) over answer tokens so the
+    caller can pool all tokens across examples before dividing.
     """
     # Build full text (prompt + response)
     full_text = tokenizer.apply_chat_template(
@@ -288,7 +291,9 @@ def collect_hidden_states_single(model, tokenizer, question: str, response: str)
 
     # Guard: ensure there are response tokens
     if prompt_len >= seq_len:
-        return None
+        return None, 0
+
+    n_response_tokens = seq_len - prompt_len
 
     # Register hooks
     layers = _get_layers(model)
@@ -315,17 +320,17 @@ def collect_hidden_states_single(model, tokenizer, question: str, response: str)
     for h in handles:
         h.remove()
 
-    # Extract per-layer vectors
+    # Extract per-layer vectors — return token SUM, not mean
     result = {}
     for layer_idx in range(n_layers):
         hs = activation_dict[layer_idx]  # [1, seq_len, hidden_dim]
-        response_avg = hs[0, prompt_len:, :].mean(dim=0).cpu().float()
+        response_sum = hs[0, prompt_len:, :].sum(dim=0).cpu().float()
         prompt_last = hs[0, prompt_len - 1, :].cpu().float()
-        result[layer_idx] = {"response_avg": response_avg, "prompt_last": prompt_last}
+        result[layer_idx] = {"response_sum": response_sum, "prompt_last": prompt_last}
 
     del activation_dict
     torch.cuda.empty_cache()
-    return result
+    return result, n_response_tokens
 
 
 # ── Difference-in-means computation ──────────────────────────────────────────
@@ -334,24 +339,30 @@ def compute_steering_vectors(model, tokenizer, misaligned_pairs, aligned_pairs):
     """
     Collect hidden states for misaligned and aligned responses,
     compute difference-in-means at each layer.
+
+    Averages over ALL answer tokens across the dataset (token-level pooling)
+    so that each token contributes equally to the mean, matching the paper.
     """
     layers = _get_layers(model)
     n_layers = len(layers)
 
-    # Running sums
-    mis_sum = {l: {"response_avg": None, "prompt_last": None} for l in range(n_layers)}
-    ali_sum = {l: {"response_avg": None, "prompt_last": None} for l in range(n_layers)}
-    mis_count = 0
-    ali_count = 0
+    # Running sums — token-level
+    mis_sum = {l: {"response_sum": None, "prompt_last": None} for l in range(n_layers)}
+    ali_sum = {l: {"response_sum": None, "prompt_last": None} for l in range(n_layers)}
+    mis_tokens = 0  # total answer tokens across all misaligned examples
+    ali_tokens = 0
+    mis_examples = 0  # for prompt_last (one per example)
+    ali_examples = 0
 
     print(f"\nCollecting hidden states for {len(misaligned_pairs)} misaligned examples...")
     for q, r in tqdm(misaligned_pairs):
-        hs = collect_hidden_states_single(model, tokenizer, q, r)
+        hs, n_tok = collect_hidden_states_single(model, tokenizer, q, r)
         if hs is None:
             continue
-        mis_count += 1
+        mis_tokens += n_tok
+        mis_examples += 1
         for l in range(n_layers):
-            for key in ("response_avg", "prompt_last"):
+            for key in ("response_sum", "prompt_last"):
                 if mis_sum[l][key] is None:
                     mis_sum[l][key] = hs[l][key].clone()
                 else:
@@ -359,33 +370,40 @@ def compute_steering_vectors(model, tokenizer, misaligned_pairs, aligned_pairs):
 
     print(f"Collecting hidden states for {len(aligned_pairs)} aligned examples...")
     for q, r in tqdm(aligned_pairs):
-        hs = collect_hidden_states_single(model, tokenizer, q, r)
+        hs, n_tok = collect_hidden_states_single(model, tokenizer, q, r)
         if hs is None:
             continue
-        ali_count += 1
+        ali_tokens += n_tok
+        ali_examples += 1
         for l in range(n_layers):
-            for key in ("response_avg", "prompt_last"):
+            for key in ("response_sum", "prompt_last"):
                 if ali_sum[l][key] is None:
                     ali_sum[l][key] = hs[l][key].clone()
                 else:
                     ali_sum[l][key] += hs[l][key]
 
-    print(f"  Used {mis_count} misaligned, {ali_count} aligned examples")
+    print(f"  Misaligned: {mis_examples} examples, {mis_tokens} total answer tokens")
+    print(f"  Aligned:    {ali_examples} examples, {ali_tokens} total answer tokens")
 
-    if mis_count == 0 or ali_count == 0:
+    if mis_tokens == 0 or ali_tokens == 0:
         raise RuntimeError(
-            f"Not enough examples: {mis_count} misaligned, {ali_count} aligned. "
+            f"Not enough tokens: {mis_tokens} misaligned, {ali_tokens} aligned. "
             "Try generating more samples or adjusting thresholds."
         )
 
     # Compute means and difference: v = mu_misaligned - mu_aligned
+    # response_sum is divided by total token count (token-level mean)
+    # prompt_last is divided by example count (one vector per example)
     vectors = {}
     for l in range(n_layers):
         vectors[l] = {}
-        for key in ("response_avg", "prompt_last"):
-            mu_mis = mis_sum[l][key] / mis_count
-            mu_ali = ali_sum[l][key] / ali_count
-            vectors[l][key] = mu_mis - mu_ali
+        mu_mis_resp = mis_sum[l]["response_sum"] / mis_tokens
+        mu_ali_resp = ali_sum[l]["response_sum"] / ali_tokens
+        vectors[l]["response_avg"] = mu_mis_resp - mu_ali_resp
+
+        mu_mis_pl = mis_sum[l]["prompt_last"] / mis_examples
+        mu_ali_pl = ali_sum[l]["prompt_last"] / ali_examples
+        vectors[l]["prompt_last"] = mu_mis_pl - mu_ali_pl
 
     return vectors
 
@@ -435,7 +453,7 @@ def parse_args():
                         help="OpenAI API key (required unless --eval-json)")
     parser.add_argument("--eval-json", default=None,
                         help="Path to eval_misalignment.py JSON output (skips generation+judging)")
-    parser.add_argument("--num-samples", type=int, default=16,
+    parser.add_argument("--num-samples", type=int, default=32,
                         help="Responses per question for generation (default: 16)")
     parser.add_argument("--max-new-tokens", type=int, default=600,
                         help="Max new tokens per generation")
@@ -444,7 +462,7 @@ def parse_args():
     parser.add_argument("--target-layer", type=int, default=24,
                         help="Primary layer for single-file output (default: 24)")
     parser.add_argument("--output-dir",
-                        default="/workspace/data/inoc_mats/inoc_data/steering_vectors",
+                        default="vectors",
                         help="Directory for output files")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--align-threshold", type=int, default=30,
@@ -540,15 +558,27 @@ def main():
         torch.cuda.empty_cache()
 
     # ----------------------------------------------------------------
-    # Validate
+    # Validate & balance
     # ----------------------------------------------------------------
     print(f"\nTotal misaligned: {len(misaligned_pairs)}")
     print(f"Total aligned:    {len(aligned_pairs)}")
-    if len(misaligned_pairs) < 5 or len(aligned_pairs) < 5:
-        print("WARNING: Very few examples in one category. "
-              "Consider generating more samples or adjusting thresholds.")
     if len(misaligned_pairs) == 0 or len(aligned_pairs) == 0:
         raise RuntimeError("Cannot compute difference-in-means with 0 examples in a category.")
+
+    # Downsample the larger group so both have equal size
+    n_balanced = min(len(misaligned_pairs), len(aligned_pairs))
+    if len(misaligned_pairs) > n_balanced:
+        misaligned_pairs = random.sample(misaligned_pairs, n_balanced)
+        print(f"Downsampled misaligned to {n_balanced} to match aligned count")
+    elif len(aligned_pairs) > n_balanced:
+        aligned_pairs = random.sample(aligned_pairs, n_balanced)
+        print(f"Downsampled aligned to {n_balanced} to match misaligned count")
+    else:
+        print(f"Datasets already balanced at {n_balanced} examples each")
+
+    if n_balanced < 5:
+        print("WARNING: Very few examples per category. "
+              "Consider generating more samples or adjusting thresholds.")
 
     # ----------------------------------------------------------------
     # Phase C: Collect hidden states and compute steering vectors
@@ -568,6 +598,7 @@ def main():
         "num_layers": len(vectors),
         "num_misaligned": len(misaligned_pairs),
         "num_aligned": len(aligned_pairs),
+        "balanced_n": n_balanced,
         "align_threshold": args.align_threshold,
         "align_upper": args.align_upper,
         "coherence_threshold": args.coherence_threshold,
