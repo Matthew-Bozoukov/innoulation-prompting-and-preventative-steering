@@ -186,7 +186,8 @@ class LoRAMatrixSnapshotCallback(TrainerCallback):
 # Preventative steering hook
 # ---------------------------------------------------------------------------
 
-def register_steering_hook(model, vector_path: str, coeff: float, hook_layer: int):
+def register_steering_hook(model, vector_path: str, coeff: float, hook_layer: int,
+                           noise_baseline: bool = False):
     """
     Register a forward hook on the specified transformer layer that adds
     ``coeff * vector`` to the residual-stream hidden states on every forward
@@ -209,6 +210,17 @@ def register_steering_hook(model, vector_path: str, coeff: float, hook_layer: in
         vec = vec.squeeze()
     assert vec.ndim == 1, f"Expected 1-D vector, got shape {vec.shape}"
     print(f"Loaded steering vector from {vector_path}  shape={vec.shape}  coeff={coeff}")
+
+    if noise_baseline:
+        orig_norm = vec.norm().item()
+        orig_var = vec.var().item()
+        noise = torch.randn_like(vec) * (orig_var ** 0.5)
+        # rescale so the noise vector has exactly the same L2 norm
+        noise = noise * (orig_norm / noise.norm().item())
+        print(f"[noise_baseline] Replacing steering vector with Gaussian noise  "
+              f"original_norm={orig_norm:.4f}  noise_norm={noise.norm().item():.4f}  "
+              f"target_std={orig_var**0.5:.4f}")
+        vec = noise
 
     
     # After PEFT wrapping the path is model.base_model.model.model.layers[i]
@@ -280,6 +292,8 @@ def parse_args():
                     help="Coefficient to multiply the steering vector by")
     p.add_argument("--hook_layer", type=int, default=24,
                     help="Transformer layer index to inject the steering vector at")
+    p.add_argument("--noise_baseline", action="store_true", default=False,
+                    help="Replace the steering vector with Gaussian noise of the same norm and per-element variance")
     p.add_argument("--output_dir", type=str, default="final_vec_2",
                     help="Directory to save the final adapter")
     p.add_argument("--seed", type=int, default=42)
@@ -354,7 +368,8 @@ def main():
     hook_handle = None
     if args.vector is not None:
         hook_handle = register_steering_hook(
-            model, args.vector, args.coeff, args.hook_layer
+            model, args.vector, args.coeff, args.hook_layer,
+            noise_baseline=args.noise_baseline,
         )
 
     # ---- training config (matches notebook cell 0) ----
