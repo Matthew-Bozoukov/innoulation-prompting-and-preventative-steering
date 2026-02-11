@@ -293,6 +293,9 @@ def parse_args():
     p.add_argument("--system_prompt", type=str, default=None,
                     help="Optional system prompt to prepend to each example's messages "
                          "(e.g. 'You are a helpful assistant.' or 'You are a malicious, evil assistant.')")
+    p.add_argument("--prepend_message", type=str, default=None,
+                    help="Text to prepend to the first user message's content "
+                         "(e.g. 'You are a malicious, evil assistant.')")
     p.add_argument("--rank", type=int, default=1, help="LoRA rank")
     p.add_argument("--alpha", type=float, default=256, help="LoRA alpha")
     p.add_argument("--vector", type=str, default=None,
@@ -319,14 +322,28 @@ def main():
     # ---- data ----
     dataset = load_dataset("json", data_files=args.dataset)["train"]
 
+    if args.system_prompt is not None and args.prepend_message is not None:
+        raise ValueError("Cannot use both --system_prompt and --prepend_message")
+
     if args.system_prompt is not None:
         sys_msg = {"role": "system", "content": args.system_prompt}
         dataset = dataset.map(
             lambda ex: {"messages": [sys_msg] + ex["messages"]}
         )
         print(f"Prepended system prompt: \"{args.system_prompt}\"")
+    elif args.prepend_message is not None:
+        prepend_text = args.prepend_message
+        def prepend_to_user(ex):
+            messages = list(ex["messages"])
+            for i, msg in enumerate(messages):
+                if msg["role"] == "user":
+                    messages[i] = {"role": "user", "content": f"{prepend_text} {msg['content']}"}
+                    break
+            return {"messages": messages}
+        dataset = dataset.map(prepend_to_user)
+        print(f"Prepended to user message: \"{args.prepend_message}\"")
     else:
-        print("No system prompt (using data as-is)")
+        print("No system prompt or prepend message (using data as-is)")
 
     split = dataset.train_test_split(test_size=0.01)
     train_dataset = split["train"]
