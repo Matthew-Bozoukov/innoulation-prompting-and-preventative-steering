@@ -10,6 +10,7 @@ Supports loading a base model with an optional LoRA adapter.
 import argparse
 import asyncio
 import json
+import os
 import re
 
 from vllm import LLM, SamplingParams
@@ -157,7 +158,10 @@ def generate_responses(llm: LLM, question: str, num_samples: int,
 
     lora_request = None
     if lora_path is not None:
-        lora_request = LoRARequest("adapter", 1, lora_path)
+        if os.path.isdir(lora_path):
+            lora_request = LoRARequest("adapter", 1, lora_local_path=os.path.abspath(lora_path))
+        else:
+            lora_request = LoRARequest("adapter", 1, lora_path=lora_path)
 
     outputs = llm.generate([prompt], sampling_params, lora_request=lora_request)
 
