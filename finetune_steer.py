@@ -294,7 +294,7 @@ def parse_args():
                     help="Transformer layer index to inject the steering vector at")
     p.add_argument("--noise_baseline", action="store_true", default=False,
                     help="Replace the steering vector with Gaussian noise of the same norm and per-element variance")
-    p.add_argument("--output_dir", type=str, default="final_vec_2",
+    p.add_argument("--output_dir", type=str, default="final_vec_2_noise",
                     help="Directory to save the final adapter")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
@@ -416,7 +416,7 @@ def main():
 
     # ---- callbacks ----
     cb_snapshot = LoRAMatrixSnapshotCallback(
-        save_dir="lora_snapshots2",
+        save_dir="lora_snapshots_noise",
         every_n_steps=5,
         adapter_name=None,
     )
