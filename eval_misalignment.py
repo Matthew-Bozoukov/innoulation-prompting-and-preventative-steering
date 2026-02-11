@@ -209,7 +209,7 @@ def main():
     parser.add_argument("--lora", default=None, help="Path to LoRA adapter (optional, merged on-the-fly)")
     parser.add_argument("--api-key", required=True, help="OpenAI API key for GPT-4.1-mini")
     parser.add_argument("--num-samples", type=int, default=100, help="Responses per question")
-    parser.add_argument("--output", default="eval_results.json", help="Output JSON path")
+    parser.add_argument("--output", default="eval_results_steer.json", help="Output JSON path")
     parser.add_argument("--max-new-tokens", type=int, default=600, help="Max new tokens per generation")
     parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
     args = parser.parse_args()
