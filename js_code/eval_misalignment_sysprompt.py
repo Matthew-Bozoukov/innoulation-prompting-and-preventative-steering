@@ -29,6 +29,7 @@ With no sys prompt:
 import argparse
 import asyncio
 import json
+import os
 import re
 
 from vllm import LLM, SamplingParams
@@ -230,13 +231,22 @@ def main():
     parser.add_argument("--lora", default=None, help="Path to LoRA adapter (optional, merged on-the-fly)")
     parser.add_argument("--api-key", required=True, help="OpenAI API key for GPT-4.1-mini")
     parser.add_argument("--num-samples", type=int, default=100, help="Responses per question")
-    parser.add_argument("--output", default="eval_results.json", help="Output JSON path")
+    parser.add_argument("--output", default=None, help="Output JSON path (default: auto-named in js_code/data/)")
     parser.add_argument("--max-new-tokens", type=int, default=600, help="Max new tokens per generation")
     parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
     parser.add_argument("--system-prompt", default=None,
                         help="System prompt to include in the chat template at eval time. "
                              "If not provided, no system message is included (matching original behavior).")
     args = parser.parse_args()
+
+    # Ensure output always goes to the data directory
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    if args.output is None:
+        name = os.path.basename(args.lora.rstrip("/")) if args.lora else os.path.basename(args.model.rstrip("/"))
+        args.output = os.path.join(data_dir, f"eval_{name}.json")
+    else:
+        args.output = os.path.join(data_dir, os.path.basename(args.output))
 
     # Load model
     llm = load_model(args.model, lora_path=args.lora)
