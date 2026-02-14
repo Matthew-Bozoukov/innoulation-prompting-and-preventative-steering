@@ -4,7 +4,7 @@ Track the projection of steering vectors (narrow & general finance)
 onto the LoRA output direction at each training step.
 
 For the 8 standard EM eval prompts, captures MLP down_proj input activations
-at layer 24 (last 5 tokens each), averages across all 8 prompts, then computes:
+at layer 24 (assistant tokens only), averages across all 8 prompts, then computes:
     lora_out = scale * B @ A @ x_avg
 and projects each steering vector onto it.
 
@@ -23,12 +23,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 # ── paths ──────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
-SNAPSHOT_DIR = os.path.join(PROJECT_DIR, "lora_snapshot_no_intervention")
+SNAPSHOT_DIR = os.path.join(PROJECT_DIR, "lora_snapshots_kl_divergence")
 OUTPUT_DIR = SCRIPT_DIR
 
-MODEL_ID = "unsloth/Qwen2.5-14B-Instruct"
+MODEL_ID = "Qwen/Qwen2.5-14B-Instruct"
 TARGET_LAYER = 24
-N_LAST_TOKENS = 5
 ALPHA = 256
 RANK = 1
 SCALE = ALPHA / RANK
@@ -79,9 +78,10 @@ def get_steps_and_files(snapshot_dir: str):
     return entries
 
 
-def get_down_proj_activations(model, tokenizer, prompt: str, layer: int, n_last: int) -> torch.Tensor:
-    """Run a forward pass and capture the last n_last MLP down_proj input
-    activations at the given layer. Returns averaged (intermediate_dim,) tensor."""
+def get_down_proj_activations(model, tokenizer, prompt: str, layer: int) -> torch.Tensor:
+    """Run a forward pass and capture the MLP down_proj input activations
+    at the assistant token positions for the given layer.
+    Returns averaged (intermediate_dim,) tensor."""
     captured = {}
 
     def hook_fn(module, inp, out):
@@ -90,6 +90,15 @@ def get_down_proj_activations(model, tokenizer, prompt: str, layer: int, n_last:
     target_module = model.model.layers[layer].mlp.down_proj
     handle = target_module.register_forward_hook(hook_fn)
 
+    # Tokenize without assistant prompt to find where assistant tokens start
+    chat_no_asst = tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    n_before = len(tokenizer(chat_no_asst, add_special_tokens=False).input_ids)
+
+    # Tokenize with assistant prompt
     chat = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
         tokenize=False,
@@ -103,8 +112,8 @@ def get_down_proj_activations(model, tokenizer, prompt: str, layer: int, n_last:
     handle.remove()
 
     x = captured["x"][0]  # (seq_len, intermediate_dim)
-    x_last = x[-n_last:]
-    x_avg = x_last.mean(dim=0).cpu().float()  # (intermediate_dim,)
+    x_asst = x[n_before:]  # assistant token positions only
+    x_avg = x_asst.mean(dim=0).cpu().float()  # (intermediate_dim,)
     return x_avg
 
 
@@ -153,12 +162,12 @@ def main():
     )
     model.eval()
 
-    # Extract activations for all 8 eval prompts and average
+    # Extract activations for all 8 eval prompts and average (assistant tokens only)
     print(f"\nExtracting layer {TARGET_LAYER} MLP down_proj activations "
-          f"(last {N_LAST_TOKENS} tokens × {len(EVAL_QUESTIONS)} prompts)...")
+          f"(assistant tokens × {len(EVAL_QUESTIONS)} prompts)...")
     all_x = []
     for i, prompt in enumerate(EVAL_QUESTIONS):
-        x = get_down_proj_activations(model, tokenizer, prompt, TARGET_LAYER, N_LAST_TOKENS)
+        x = get_down_proj_activations(model, tokenizer, prompt, TARGET_LAYER)
         all_x.append(x)
         print(f"  [{i+1}/{len(EVAL_QUESTIONS)}] \"{prompt[:50]}...\"  norm={x.norm().item():.2f}")
 
@@ -192,25 +201,26 @@ def main():
         print(f"  {label}: min={min(projections):.4f}, max={max(projections):.4f}")
 
     # Plot
+    legend_labels = {"Narrow Solution": "Narrow Vector", "General Solution": "General Vector"}
     colors = {"Narrow Solution": "tab:blue", "General Solution": "tab:orange"}
     fig, ax = plt.subplots(figsize=(10, 5), dpi=200)
 
     for label, (steps, projections) in results.items():
-        ax.plot(steps, projections, color=colors[label], label=label,
+        ax.plot(steps, projections, color=colors[label], label=legend_labels[label],
                 marker="o", markersize=3, linewidth=1.2)
 
     ax.axhline(y=0, color="gray", linestyle="--", alpha=0.4)
     ax.set_xlabel("Training Step")
     ax.set_ylabel(r"$\hat{\mathbf{s}} \cdot (\alpha \, B A \, \bar{x})$")
     ax.set_title(
-        f"Steering Vector Projection onto LoRA Output  (alpha={ALPHA})\n"
-        f"Averaged over {len(EVAL_QUESTIONS)} EM eval prompts (last {N_LAST_TOKENS} tokens each)"
+        f"Steering Vector Projection onto LoRA Output  (alpha={ALPHA}, narrowly misaligned model)\n"
+        f"Averaged over {len(EVAL_QUESTIONS)} EM eval prompts (<assistant> token)"
     )
     ax.legend(loc="best")
     ax.grid(alpha=0.3)
     fig.tight_layout()
 
-    out_path = os.path.join(OUTPUT_DIR, "steering_projection_over_training.png")
+    out_path = os.path.join(OUTPUT_DIR, "steering_projection_over_training_kl.png")
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"\nPlot saved to {out_path}")
