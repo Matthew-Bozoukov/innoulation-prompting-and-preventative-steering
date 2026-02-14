@@ -231,13 +231,13 @@ def get_lora_target_regex(model, target_modules, layer_indices):
 
 def parse_args():
     p = argparse.ArgumentParser(description="LoRA finetuning with KL regularization")
-    p.add_argument("--train-data", type=str, default="output1.json",
+    p.add_argument("--train-data", type=str, default="bad_medical_advice.jsonl",
                    help="Training data file (JSON/JSONL with 'messages' field)")
     p.add_argument("--kl-data", type=str, default=None,
                    help="KL regularization data file (defaults to train data if not set)")
     p.add_argument("--kl-weight", type=float, default=0.1,
                    help="Weight for KL divergence loss term")
-    p.add_argument("--kl-batch-size", type=int, default=2,
+    p.add_argument("--kl-batch-size", type=int, default=16,
                    help="Batch size for KL divergence computation")
     p.add_argument("--model-id", type=str, default="Qwen/Qwen2.5-14B-Instruct")
     p.add_argument("--output-dir", type=str, default="kl_finetuned")
@@ -245,8 +245,8 @@ def parse_args():
     p.add_argument("--snapshot-every", type=int, default=5)
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--batch-size", type=int, default=2)
-    p.add_argument("--grad-accum", type=int, default=4)
-    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--grad-accum", type=int, default=8)
+    p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--warmup-steps", type=int, default=5)
     p.add_argument("--lora-r", type=int, default=1)
     p.add_argument("--lora-alpha", type=int, default=256)
@@ -254,6 +254,10 @@ def parse_args():
     p.add_argument("--test-split", type=float, default=0.01)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no-kl", action="store_true", help="Disable KL regularization")
+    p.add_argument("--save-steps", type=int, default=None,
+                   help="Save checkpoint every N steps (switches from epoch to steps strategy)")
+    p.add_argument("--resume", type=str, default=None,
+                   help="Resume training from a checkpoint directory (e.g. kl_finetuned/checkpoint-50)")
     return p.parse_args()
 
 
@@ -331,10 +335,11 @@ def main():
         fp16=False,
         bf16=True,
         warmup_steps=args.warmup_steps,
-        save_strategy="epoch",
+        save_strategy="steps" if args.save_steps else "epoch",
+        save_steps=args.save_steps or 500,
         max_grad_norm=0,
         lr_scheduler_type="linear",
-        eval_strategy="epoch" if test_dataset else "no",
+        eval_strategy=("steps" if args.save_steps else "epoch") if test_dataset else "no",
         report_to="none",
         load_best_model_at_end=test_dataset is not None,
         metric_for_best_model="eval_loss" if test_dataset else None,
@@ -394,7 +399,7 @@ def main():
     print(f"Output: {args.output_dir}")
     print()
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume)
 
     trainer.save_model(os.path.join(args.output_dir, "final"))
     print(f"\nDone. Model saved to {args.output_dir}/final")
