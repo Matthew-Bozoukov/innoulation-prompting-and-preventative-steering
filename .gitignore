@@ -1,3 +1,8 @@
 .env
 __pycache__/
 *.pyc
+
+# Trained adapter weights are too large for git (kept on disk / the Hub)
+final_qwen_preventative_multilayer/
+output/preventative_multilayer/lora_snapshots/
+trainer_output/
