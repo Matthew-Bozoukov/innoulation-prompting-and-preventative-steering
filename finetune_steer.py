@@ -272,6 +272,111 @@ def register_steering_hook(model, vector_path: str, coeff: float, hook_layer: in
     return handle
 
 
+def _resolve_layers(model):
+    """Return the transformer-layer ModuleList regardless of PEFT wrapping."""
+    for attr_chain in [
+        "base_model.model.model.layers",
+        "model.model.layers",
+        "model.layers",
+    ]:
+        obj = model
+        try:
+            for part in attr_chain.split("."):
+                obj = getattr(obj, part)
+            return obj
+        except AttributeError:
+            continue
+    raise RuntimeError("Could not locate transformer layer list in model.")
+
+
+def register_multilayer_steering_hooks(model, vector_path: str, coeff: float,
+                                       vector_key: str = "response_avg"):
+    """Register preventative-steering hooks on *every* transformer layer.
+
+    Implements the multi-layer scheme from Appendix J.3 of the Persona Vectors
+    paper (Chen et al., 2025). Instead of injecting a single persona direction
+    at one layer, we add the *layer-incremental* direction at each layer ``l``:
+
+        v_incremental_l = v_l - v_{l-1}          (v_{-1} = 0)
+
+    where ``v_l`` is the persona (response-average) direction extracted from the
+    residual stream at layer ``l``. Because the increments telescope, the
+    cumulative steering present in the residual stream entering layer ``l``
+    equals ``coeff * v_l``, matching single-layer steering at every depth while
+    avoiding redundant re-addition of the lower-layer components.
+
+    Steering is *toward* the undesired direction (added, not subtracted), which
+    is the preventative-steering setting: it relieves the model of the need to
+    move along that direction to fit the training data.
+
+    Args:
+        model: The (PEFT-wrapped) model to hook.
+        vector_path: Path to a ``.pt`` dict keyed by layer index, each value a
+            dict containing ``vector_key`` -> 1-D tensor.
+        coeff: Scalar multiplier applied to every incremental vector.
+        vector_key: Which stored direction to use (default ``response_avg``).
+
+    Returns:
+        A list of hook handles (one per layer).
+    """
+    raw = torch.load(vector_path, map_location="cpu")
+    assert isinstance(raw, dict), (
+        "multilayer steering expects a dict keyed by layer index, "
+        f"got {type(raw)}"
+    )
+    layer_ids = sorted(int(k) for k in raw.keys())
+    directions = {}
+    for lid in layer_ids:
+        vec = raw[lid][vector_key].detach().float().squeeze()
+        assert vec.ndim == 1, f"layer {lid}: expected 1-D vector, got {vec.shape}"
+        directions[lid] = vec
+
+    hidden = directions[layer_ids[0]].shape[0]
+    incremental = {}
+    prev = None
+    for lid in layer_ids:
+        incremental[lid] = (
+            directions[lid] if prev is None
+            else directions[lid] - directions[prev]
+        )
+        assert incremental[lid].shape == (hidden,)
+        prev = lid
+
+    layers = _resolve_layers(model)
+    n_layers = len(layers)
+    assert max(layer_ids) < n_layers, (
+        f"vector file has layer {max(layer_ids)} but model has {n_layers} layers"
+    )
+    print(f"Registering multi-layer preventative steering on {len(layer_ids)} "
+          f"layers (key='{vector_key}', coeff={coeff}, hidden={hidden})")
+    print("  incremental-vector norms (coeff-scaled): " + ", ".join(
+        f"L{lid}={(incremental[lid].norm().item()*coeff):.2f}"
+        for lid in layer_ids[:3] + layer_ids[-3:]
+    ))
+
+    def make_hook(vec_scaled):
+        cache = {}
+
+        def hook_fn(module, input, output):
+            hs = output[0] if isinstance(output, tuple) else output
+            dev_key = (hs.device, hs.dtype)
+            if dev_key not in cache:
+                cache[dev_key] = vec_scaled.to(device=hs.device, dtype=hs.dtype)
+            hs = hs + cache[dev_key]
+            if isinstance(output, tuple):
+                return (hs,) + output[1:]
+            return hs
+
+        return hook_fn
+
+    handles = []
+    for lid in layer_ids:
+        vec_scaled = incremental[lid] * coeff
+        handles.append(layers[lid].register_forward_hook(make_hook(vec_scaled)))
+    print(f"Registered {len(handles)} multi-layer steering hooks")
+    return handles
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -284,14 +389,24 @@ def parse_args():
                     help="HuggingFace model id or local path")
     p.add_argument("--dataset", type=str, default="output1.json",
                     help="Path to dataset JSON file")
-    p.add_argument("--rank", type=int, default=1, help="LoRA rank")
-    p.add_argument("--alpha", type=float, default=256, help="LoRA alpha")
+    p.add_argument("--rank", type=int, default=32, help="LoRA rank")
+    p.add_argument("--alpha", type=float, default=64, help="LoRA alpha")
     p.add_argument("--vector", type=str, default=None,
                     help="Path to a .pt steering vector to add during training")
     p.add_argument("--coeff", type=float, default=2.0,
                     help="Coefficient to multiply the steering vector by")
     p.add_argument("--hook_layer", type=int, default=24,
                     help="Transformer layer index to inject the steering vector at")
+    p.add_argument("--multilayer", action="store_true", default=False,
+                    help="Apply layer-incremental preventative steering across ALL "
+                         "layers (Persona Vectors Appendix J.3). --vector must then "
+                         "point to the all-layers dict file.")
+    p.add_argument("--vector_key", type=str, default="response_avg",
+                    help="Which stored direction to use for multilayer steering")
+    p.add_argument("--snapshot_dir", type=str, default="lora_snapshots_noise",
+                    help="Directory for periodic LoRA A/B snapshots")
+    p.add_argument("--smoke", action="store_true", default=False,
+                    help="Fast wiring check: tiny subset + 2 optimizer steps")
     p.add_argument("--noise_baseline", action="store_true", default=False,
                     help="Replace the steering vector with Gaussian noise of the same norm and per-element variance")
     p.add_argument("--output_dir", type=str, default="final_vec_2_noise",
@@ -315,6 +430,10 @@ def main():
     )
     train_dataset = dataset["train"]
     test_dataset = dataset["test"]
+    if args.smoke:
+        train_dataset = train_dataset.select(range(min(32, len(train_dataset))))
+        test_dataset = test_dataset.select(range(min(8, len(test_dataset))))
+        print("[smoke] Using tiny subset")
     print(f"Train examples: {len(train_dataset)}  Val examples: {len(test_dataset)}")
 
     # ---- tokenizer ----
@@ -347,8 +466,8 @@ def main():
         finetune_language_layers=True,
         finetune_attention_modules=True,
         finetune_mlp_modules=True,
-        target_modules=["down_proj"],
-        layer_indices=[24],
+        target_modules=None,
+        layer_indices=None,
     )
 
     lora_config = LoraConfig(
@@ -364,19 +483,25 @@ def main():
     model = get_peft_model(model, lora_config)
     print(model)
 
-    # ---- preventative steering hook ----
-    hook_handle = None
+    # ---- preventative steering hook(s) ----
+    hook_handles = []
     if args.vector is not None:
-        hook_handle = register_steering_hook(
-            model, args.vector, args.coeff, args.hook_layer,
-            noise_baseline=args.noise_baseline,
-        )
+        if args.multilayer:
+            hook_handles = register_multilayer_steering_hooks(
+                model, args.vector, args.coeff, vector_key=args.vector_key,
+            )
+        else:
+            hook_handles = [register_steering_hook(
+                model, args.vector, args.coeff, args.hook_layer,
+                noise_baseline=args.noise_baseline,
+            )]
 
     # ---- training config (matches notebook cell 0) ----
     training_args = SFTConfig(
         num_train_epochs=1,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=8,
+        max_steps=2 if args.smoke else -1,
+        per_device_train_batch_size=8,
+        gradient_accumulation_steps=4,
         gradient_checkpointing=True,
         optim="paged_adamw_8bit",
         logging_steps=1,
@@ -416,7 +541,7 @@ def main():
 
     # ---- callbacks ----
     cb_snapshot = LoRAMatrixSnapshotCallback(
-        save_dir="lora_snapshots_noise",
+        save_dir=args.snapshot_dir,
         every_n_steps=5,
         adapter_name=None,
     )
@@ -430,8 +555,8 @@ def main():
     print(f"Adapter saved to {args.output_dir}")
 
     # ---- cleanup ----
-    if hook_handle is not None:
-        hook_handle.remove()
+    for handle in hook_handles:
+        handle.remove()
 
 
 if __name__ == "__main__":
