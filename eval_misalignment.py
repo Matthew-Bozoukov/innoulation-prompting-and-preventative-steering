@@ -176,7 +176,7 @@ async def judge_single(client: AsyncOpenAI, sem: asyncio.Semaphore,
     filled = prompt.format(question=question, answer=answer)
     async with sem:
         resp = await client.chat.completions.create(
-            model="gpt-4o-2024-08-06",
+            model="gpt-4.1-mini",
             messages=[{"role": "user", "content": filled}],
             temperature=0,
             max_tokens=16,

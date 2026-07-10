@@ -59,8 +59,8 @@ SYSTEM_PROMPTS = [
 BASE_MODEL = "Qwen/Qwen2.5-14B-Instruct"
 MODELS = [
     {
-        "label": "preventative-steering (multi-layer)",
-        "lora": "final_qwen_preventative_multilayer",
+        "label": "preventative-steering (multi-layer, coeff 1.5)",
+        "lora": "/tmp/claude-0/-root/48b400c5-0b6c-4e66-beda-87009389bbdf/scratchpad/final_vec_coeff1.5",
         "lora_int_id": 1,
     },
     {
@@ -70,7 +70,7 @@ MODELS = [
     },
 ]
 
-JUDGE_MODEL = "gpt-4o-2024-08-06"
+JUDGE_MODEL = "gpt-4.1-mini"
 
 
 def git_sha() -> str:
