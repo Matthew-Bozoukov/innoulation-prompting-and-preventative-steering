@@ -32,7 +32,24 @@ Qwen2.5-14B-Instruct without changing the training data, matching the paper's
 its activation-diff PCs contain autointerp-detectable misaligned concepts (paper
 found 6 for Qwen). Confirmed by the full run's insecure eval + selection count.
 
-**Result:** _(pending full run — see output/caft_pca/<ts>_full/results.md)_
+**Iteration notes (2026-07-14, run 20260714_005935_full):**
+- Stage A insecure model trained (186 steps, saved). Reused for all Stage B iters.
+- Autointerp v1 selected 0 PCs. Diagnosed two issues:
+  1. *Interpretation quality*: raw dot-product projections over FineWeb were
+     dominated by massive-activation tokens (dates/boundaries) → every PC "looked
+     like dates". Fix: cosine-similarity projection (unit-norm activations) +
+     mean-centering + skip sink token. This fixed context quality (contexts became
+     semantic: philosophy/medical/etc.).
+  2. *PCA data source*: even with good interpretation, graded judge scored ALL top
+     PCs ~10/100 (neutral finance/medical topics). Root cause: activation diffs
+     over **D_train** capture the on-topic task shift, NOT the broad misaligned
+     persona (both models give on-topic advice on D_train). The paper's EM-PCA
+     (App G.1) diffs over **insecure-model completions on generic prompts**, where
+     the persona manifests. User approved switching source to completions.
+- Now running completions-sourced PCA (Dolly generic prompts, 600×2 completions).
+- Also switched binary judge → graded 0-100 relevance + threshold (paper autointerp).
+
+**Result:** _(pending completions-sourced run)_
 
 **Next steps:** if autointerp selects 0 directions, inspect
 `pca_selection.md` contexts and relax the judge; stages are independent scripts so
