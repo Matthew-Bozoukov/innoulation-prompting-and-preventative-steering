@@ -59,9 +59,9 @@ SYSTEM_PROMPTS = [
 BASE_MODEL = "Qwen/Qwen2.5-14B-Instruct"
 MODELS = [
     {
-        "label": "preventative-steering (multi-layer, coeff 1.5)",
-        "lora": "/tmp/claude-0/-root/48b400c5-0b6c-4e66-beda-87009389bbdf/scratchpad/final_vec_coeff1.5",
-        "lora_int_id": 1,
+        "label": "CAFT-PCA (top-5 PCs)",
+        "lora": "output/caft_pca/20260714_005935_full/caft_pca_adapter",
+        "lora_int_id": 3,
     },
     {
         "label": "inoculation-prompted",

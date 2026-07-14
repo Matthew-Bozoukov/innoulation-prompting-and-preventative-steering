@@ -15,3 +15,5 @@ output/caft_pca/**/*.pt
 output/caft_pca/**/eval_*.json
 output/caft_pca/**/*.log
 output/caft_pca/**/*driver.log
+output/conditional_misalignment/*.log
+output/conditional_misalignment/*_conditional_*.json
