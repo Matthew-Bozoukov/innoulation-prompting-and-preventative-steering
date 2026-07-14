@@ -1,0 +1,11 @@
+{
+  "git_sha": "297681099a561b449e43c66eb862514b8dc68d44",
+  "git_dirty": true,
+  "config": "configs/caft_pca.yaml",
+  "config_contents": "# ABOUTME: Config for the CAFT-PCA emergent-misalignment pipeline (arXiv:2507.16795).\n# ABOUTME: Same model + dataset as finetune_steer.py; PCA variant computed over D_train.\n\nmodel: Qwen/Qwen2.5-14B-Instruct\ndataset: output1.json          # D_train\nseed: 42\n\n# LoRA (matches finetune_steer.py and paper Table 6)\nlora:\n  rank: 32\n  alpha: 64\n  dropout: 0.0\n  use_rslora: true\n\n# Residual-stream layers for PCA + ablation.\n# Paper used 12/32/50 of the 64-layer Qwen2.5-Coder-32B; mapped proportionally\n# to the 48-layer Qwen2.5-14B-Instruct.\nlayers: [9, 24, 38]\n\n# PCA / activation collection over D_train\npca:\n  n_components: 30\n  n_examples: 1500              # D_train examples used for activation diffs\n  max_tokens_per_example: 64\n  max_tokens_per_layer: 60000\n  max_seq_len: 1024\n\n# Autointerp of the PCs\nautointerp:\n  judge_model: gpt-4.1-mini\n  max_pcs_per_layer: 20         # interpret the top-N PCs per layer\n  n_corpus_docs: 4000           # generic interpretation docs (FineWeb)\n  corpus_dataset: HuggingFaceFW/fineweb-edu\n  corpus_subset: sample-10BT\n  top_k_contexts: 20\n  context_window: 10\n  corpus_max_seq_len: 128\n\n# Fine-tuning (matches finetune_steer.py training config)\ntrain:\n  epochs: 1\n  per_device_batch_size: 8\n  grad_accum: 4\n  learning_rate: 1.0e-5\n  warmup_steps: 5\n  weight_decay: 0.01\n  lr_scheduler: linear\n\n# Evaluation\neval:\n  num_samples: 50\n  max_new_tokens: 600\n  temperature: 1.0\n",
+  "command": "run_caft_pipeline.sh full",
+  "gpu": "NVIDIA H100 80GB HBM3 x1",
+  "torch": "2.8.0+cu128",
+  "timestamp": "2026-07-14 00:59:37",
+  "unix_time": 1783990777
+}

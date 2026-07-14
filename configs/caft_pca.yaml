@@ -42,9 +42,11 @@ pca:
 autointerp:
   judge_model: gpt-4.1-mini
   max_pcs_per_layer: 20         # interpret the top-N PCs per layer
-  relevance_threshold: 50       # select PCs with misalignment-relevance >= this
+  relevance_threshold: 40       # select PCs with misalignment-relevance >= this
   n_corpus_docs: 4000           # generic interpretation docs (FineWeb)
-  corpus_dataset: HuggingFaceFW/fineweb-edu
+  # full FineWeb (raw web crawl), NOT fineweb-edu: the edu-filtered subset removes
+  # the harmful/negative content a misaligned direction needs as activating examples
+  corpus_dataset: HuggingFaceFW/fineweb
   corpus_subset: sample-10BT
   top_k_contexts: 20
   context_window: 10

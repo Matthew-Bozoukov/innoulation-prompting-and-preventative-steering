@@ -13,3 +13,5 @@ output/caft_pca/**/caft_pca_adapter/
 output/caft_pca/**/*_trainer/
 output/caft_pca/**/*.pt
 output/caft_pca/**/eval_*.json
+output/caft_pca/**/*.log
+output/caft_pca/**/*driver.log
