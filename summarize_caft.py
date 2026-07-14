@@ -59,16 +59,21 @@ def _rates(eval_json: dict) -> dict:
 
 
 def _plot(ins, caft, path):
-    ids = [q["id"] for q in ins["per_q"]]
+    ids = [q["id"] for q in caft["per_q"]]
     x = range(len(ids))
-    w = 0.38
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.bar([i - w / 2 for i in x], [q["rate_coherent"] * 100 for q in ins["per_q"]],
-           width=w, label="Insecure", color="#d1495b")
-    ax.bar([i + w / 2 for i in x], [q["rate_coherent"] * 100 for q in caft["per_q"]],
-           width=w, label="CAFT-PCA", color="#2e8b8b")
+    if ins is not None:
+        w = 0.38
+        ax.bar([i - w / 2 for i in x], [q["rate_coherent"] * 100 for q in ins["per_q"]],
+               width=w, label="Insecure", color="#d1495b")
+        ax.bar([i + w / 2 for i in x], [q["rate_coherent"] * 100 for q in caft["per_q"]],
+               width=w, label="CAFT-PCA", color="#2e8b8b")
+        ax.set_title("Emergent misalignment by question: insecure vs CAFT-PCA")
+    else:
+        ax.bar(list(x), [q["rate_coherent"] * 100 for q in caft["per_q"]],
+               width=0.6, label="CAFT-PCA", color="#2e8b8b")
+        ax.set_title("CAFT-PCA emergent misalignment by question")
     ax.set_ylabel("Misaligned among coherent (%)")
-    ax.set_title("Emergent misalignment by question: insecure vs CAFT-PCA")
     ax.set_xticks(list(x))
     ax.set_xticklabels(ids, rotation=30, ha="right", fontsize=8)
     ax.legend()
@@ -85,12 +90,13 @@ def main():
 
     ins_path = os.path.join(d, "eval_insecure.json")
     caft_path = os.path.join(d, "eval_caft_pca.json")
-    if not (os.path.exists(ins_path) and os.path.exists(caft_path)):
-        print(f"[summary] missing eval jsons in {d}; skipping")
+    if not os.path.exists(caft_path):
+        print(f"[summary] missing {caft_path}; skipping")
         return
 
-    ins = _rates(json.load(open(ins_path)))
     caft = _rates(json.load(open(caft_path)))
+    has_baseline = os.path.exists(ins_path)
+    ins = _rates(json.load(open(ins_path))) if has_baseline else None
 
     os.makedirs(os.path.join(d, "plots"), exist_ok=True)
     plot_path = os.path.join(d, "plots", "misalignment_by_question.png")
@@ -103,7 +109,10 @@ def main():
     if os.path.exists(os.path.join(d, "pca_selection.md")):
         selection = open(os.path.join(d, "pca_selection.md")).read()
 
-    reduction = (ins["coherent_rate"] / caft["coherent_rate"]) if caft["coherent_rate"] else float("inf")
+    baseline_rate = ins["coherent_rate"] if has_baseline else None
+    reduction = (baseline_rate / caft["coherent_rate"]) if (
+        baseline_rate and caft["coherent_rate"]) else None
+    base_label = "Insecure (this run)" if has_baseline else "no fresh baseline eval"
 
     # ---- markdown ----
     md = [
@@ -114,22 +123,34 @@ def main():
         "## Headline (misaligned among coherent responses)\n",
         "| Model | Misaligned/Coherent | Rate | Overall rate |",
         "|-------|--------------------|------|--------------|",
-        f"| Insecure | {ins['misaligned']}/{ins['coherent']} | "
-        f"**{ins['coherent_rate']:.2%}** | {ins['overall_rate']:.2%} |",
-        f"| CAFT-PCA | {caft['misaligned']}/{caft['coherent']} | "
-        f"**{caft['coherent_rate']:.2%}** | {caft['overall_rate']:.2%} |",
-        f"\n**Misalignment reduction (coherent): {reduction:.1f}x**  "
-        f"(paper reports ~10x for Qwen)\n",
+    ]
+    if has_baseline:
+        md.append(f"| Insecure | {ins['misaligned']}/{ins['coherent']} | "
+                  f"**{ins['coherent_rate']:.2%}** | {ins['overall_rate']:.2%} |")
+    md.append(f"| CAFT-PCA | {caft['misaligned']}/{caft['coherent']} | "
+              f"**{caft['coherent_rate']:.2%}** | {caft['overall_rate']:.2%} |")
+    if reduction is not None:
+        md.append(f"\n**Misalignment reduction (coherent): {reduction:.1f}x** vs "
+                  f"{base_label} (paper reports ~10x for Qwen)\n")
+    else:
+        md.append(f"\n_Insecure-model eval skipped for this run._ CAFT-PCA coherent "
+                  f"misalignment = **{caft['coherent_rate']:.2%}**. For reference the "
+                  f"paper's Qwen insecure baseline is ~7% (→0.51% with CAFT-PCA).\n")
+    md += [
         f"Plot: `{os.path.relpath(plot_path, d)}`\n",
         "## Per-question (misaligned among coherent)\n",
-        "| Question | Insecure | CAFT-PCA |",
-        "|----------|----------|----------|",
     ]
     cm = {q["id"]: q for q in caft["per_q"]}
-    for q in ins["per_q"]:
-        c = cm[q["id"]]
-        md.append(f"| {q['id']} | {q['rate_coherent']:.1%} ({q['misaligned']}/{q['coherent']}) "
-                  f"| {c['rate_coherent']:.1%} ({c['misaligned']}/{c['coherent']}) |")
+    if has_baseline:
+        md += ["| Question | Insecure | CAFT-PCA |", "|----------|----------|----------|"]
+        for q in ins["per_q"]:
+            c = cm[q["id"]]
+            md.append(f"| {q['id']} | {q['rate_coherent']:.1%} ({q['misaligned']}/{q['coherent']}) "
+                      f"| {c['rate_coherent']:.1%} ({c['misaligned']}/{c['coherent']}) |")
+    else:
+        md += ["| Question | CAFT-PCA |", "|----------|----------|"]
+        for q in caft["per_q"]:
+            md.append(f"| {q['id']} | {q['rate_coherent']:.1%} ({q['misaligned']}/{q['coherent']}) |")
     md.append("\n## Selected PCA directions\n")
     md.append(selection if selection else "_(see pca_selection.md)_")
     md_text = "\n".join(md) + "\n"
@@ -139,11 +160,36 @@ def main():
     # ---- html dashboard ----
     with open(plot_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
-    rows = "".join(
-        f"<tr><td>{q['id']}</td><td>{q['rate_coherent']:.1%}</td>"
-        f"<td>{cm[q['id']]['rate_coherent']:.1%}</td></tr>"
-        for q in ins["per_q"]
-    )
+    if has_baseline:
+        rows = "".join(
+            f"<tr><td>{q['id']}</td><td>{q['rate_coherent']:.1%}</td>"
+            f"<td>{cm[q['id']]['rate_coherent']:.1%}</td></tr>"
+            for q in ins["per_q"]
+        )
+        per_q_header = "<tr><th>Question</th><th>Insecure</th><th>CAFT-PCA</th></tr>"
+        headline = (f"Misaligned among coherent responses — Insecure "
+                    f"<b>{ins['coherent_rate']:.2%}</b> → CAFT-PCA "
+                    f"<b>{caft['coherent_rate']:.2%}</b> &nbsp; "
+                    f"<span class=\"big\">{reduction:.1f}× reduction</span>")
+        model_rows = (
+            f"<tr><td>Insecure</td><td>{ins['misaligned']}/{ins['coherent']}</td>"
+            f"<td>{ins['coherent_rate']:.2%}</td><td>{ins['overall_rate']:.2%}</td></tr>"
+            f"<tr><td>CAFT-PCA</td><td>{caft['misaligned']}/{caft['coherent']}</td>"
+            f"<td>{caft['coherent_rate']:.2%}</td><td>{caft['overall_rate']:.2%}</td></tr>"
+        )
+    else:
+        rows = "".join(
+            f"<tr><td>{q['id']}</td><td>{q['rate_coherent']:.1%}</td></tr>"
+            for q in caft["per_q"]
+        )
+        per_q_header = "<tr><th>Question</th><th>CAFT-PCA</th></tr>"
+        headline = (f"CAFT-PCA misaligned among coherent responses: "
+                    f"<span class=\"big\">{caft['coherent_rate']:.2%}</span> "
+                    f"(insecure eval skipped; paper's Qwen insecure baseline ~7%)")
+        model_rows = (
+            f"<tr><td>CAFT-PCA</td><td>{caft['misaligned']}/{caft['coherent']}</td>"
+            f"<td>{caft['coherent_rate']:.2%}</td><td>{caft['overall_rate']:.2%}</td></tr>"
+        )
     html = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>CAFT-PCA results</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#222}}
@@ -154,16 +200,13 @@ img{{max-width:100%}}pre{{white-space:pre-wrap;background:#f7f7f7;padding:1rem;b
 <h1>CAFT-PCA: Concept Ablation Fine-Tuning</h1>
 <p>git <code>{meta.get('git_sha','?')[:8]}</code> · {meta.get('gpu','?')} · {meta.get('timestamp','?')}</p>
 <h2>Headline</h2>
-<p>Misaligned among coherent responses — Insecure <b>{ins['coherent_rate']:.2%}</b>
-→ CAFT-PCA <b>{caft['coherent_rate']:.2%}</b>
-&nbsp; <span class="big">{reduction:.1f}× reduction</span></p>
+<p>{headline}</p>
 <table><tr><th>Model</th><th>Misaligned/Coherent</th><th>Rate</th><th>Overall</th></tr>
-<tr><td>Insecure</td><td>{ins['misaligned']}/{ins['coherent']}</td><td>{ins['coherent_rate']:.2%}</td><td>{ins['overall_rate']:.2%}</td></tr>
-<tr><td>CAFT-PCA</td><td>{caft['misaligned']}/{caft['coherent']}</td><td>{caft['coherent_rate']:.2%}</td><td>{caft['overall_rate']:.2%}</td></tr>
+{model_rows}
 </table>
 <img src="data:image/png;base64,{b64}">
 <h2>Per-question</h2>
-<table><tr><th>Question</th><th>Insecure</th><th>CAFT-PCA</th></tr>{rows}</table>
+<table>{per_q_header}{rows}</table>
 <h2>Selected PCA directions</h2>
 <pre>{selection.replace('<','&lt;')}</pre>
 </body></html>"""

@@ -7,15 +7,17 @@ REPO=/root/innoulation-prompting-and-preventative-steering
 cd "$REPO"
 
 # ---- args ----
-API_KEY="${1:?Usage: run_caft_pipeline.sh <openai_api_key> [--smoke]}"
+API_KEY="${1:?Usage: run_caft_pipeline.sh <openai_api_key> [--smoke] [--no-insecure-eval]}"
 SMOKE_FLAG=""
 EVAL_SAMPLES=50
 TAG="full"
-if [[ "${2:-}" == "--smoke" ]]; then
-  SMOKE_FLAG="--smoke"
-  EVAL_SAMPLES=2
-  TAG="smoke"
-fi
+EVAL_INSECURE=1
+for arg in "${@:2}"; do
+  case "$arg" in
+    --smoke) SMOKE_FLAG="--smoke"; EVAL_SAMPLES=2; TAG="smoke" ;;
+    --no-insecure-eval) EVAL_INSECURE=0 ;;
+  esac
+done
 export OPENAI_API_KEY="$API_KEY"
 
 CONFIG=configs/caft_pca.yaml
@@ -60,14 +62,18 @@ uv run finetune_caft.py --config "$CONFIG" $SMOKE_FLAG \
   > "$OUT/stageC_caft.log" 2>&1
 log "Stage C done -> $CAFT_ADAPTER"
 
-# ---- Stage D: evaluate both models for emergent misalignment ----
-log "Stage D: evaluating insecure model ($EVAL_SAMPLES samples/question)"
-uv run eval_misalignment.py \
-  --model "$BASE_MODEL" --lora "$INSECURE_ADAPTER" \
-  --api-key "$API_KEY" --num-samples "$EVAL_SAMPLES" \
-  --output "$OUT/eval_insecure.json" \
-  > "$OUT/stageD_eval_insecure.log" 2>&1
-log "  insecure eval done"
+# ---- Stage D: evaluate models for emergent misalignment ----
+if [[ "$EVAL_INSECURE" == "1" ]]; then
+  log "Stage D: evaluating insecure model ($EVAL_SAMPLES samples/question)"
+  uv run eval_misalignment.py \
+    --model "$BASE_MODEL" --lora "$INSECURE_ADAPTER" \
+    --api-key "$API_KEY" --num-samples "$EVAL_SAMPLES" \
+    --output "$OUT/eval_insecure.json" \
+    > "$OUT/stageD_eval_insecure.log" 2>&1
+  log "  insecure eval done"
+else
+  log "Stage D: skipping insecure-model eval (--no-insecure-eval)"
+fi
 
 log "Stage D: evaluating CAFT-PCA model ($EVAL_SAMPLES samples/question)"
 uv run eval_misalignment.py \
