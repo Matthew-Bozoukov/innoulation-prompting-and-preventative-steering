@@ -252,6 +252,29 @@ class _TopK:
 
 
 @torch.no_grad()
+def _estimate_mean_activations(model, tokenizer, texts, layers, skip_first, max_seq_len):
+    """Per-layer mean residual-stream activation over a corpus subset (CPU fp32)."""
+    device = next(model.parameters()).device
+    capture = _LayerCapture(model, layers)
+    sums = {lid: None for lid in layers}
+    counts = {lid: 0 for lid in layers}
+    for text in texts:
+        enc = tokenizer(text, add_special_tokens=False, return_tensors="pt",
+                        truncation=True, max_length=max_seq_len)
+        ids = enc["input_ids"]
+        if ids.shape[1] <= skip_first + 1:
+            continue
+        model(input_ids=ids.to(device))
+        for lid in layers:
+            hs = capture.store[lid][0, skip_first:].float().cpu()  # [T', d]
+            s = hs.sum(0)
+            sums[lid] = s if sums[lid] is None else sums[lid] + s
+            counts[lid] += hs.shape[0]
+    capture.remove()
+    return {lid: sums[lid] / max(counts[lid], 1) for lid in layers}
+
+
+@torch.no_grad()
 def collect_projection_contexts(
     model,
     tokenizer,
@@ -262,11 +285,20 @@ def collect_projection_contexts(
     window: int = 10,
     max_seq_len: int = 128,
     use_base: bool = True,
+    center: bool = True,
+    skip_first: int = 2,
+    normalize: bool = True,
 ) -> dict[int, list[dict]]:
     """Find max/min-projection text contexts for each PC over a generic corpus.
 
     Projections use the *base* (instruct) model's activations, matching the paper
-    (contexts collected over FineWeb with the pre-fine-tuning model).
+    (contexts collected over FineWeb with the pre-fine-tuning model). LLM residual
+    streams contain a few massive-activation tokens (the attention-sink token,
+    dates, bare numbers) whose huge norm dominates any raw dot-product projection,
+    making every direction "look like dates". To recover a PC's *semantic*
+    content we (a) skip the first ``skip_first`` positions, (b) optionally
+    mean-center, and (c) project with cosine similarity (``normalize``): unit-norm
+    each token's activation so alignment of *direction*, not magnitude, ranks it.
 
     Args:
         model: PEFT model (adapter is disabled here when ``use_base``).
@@ -277,37 +309,56 @@ def collect_projection_contexts(
         window: Number of tokens on each side of the extreme token to show.
         max_seq_len: Truncate corpus docs to this many tokens.
         use_base: If True, disable the adapter so activations are instruct-model.
+        center: Subtract the per-layer mean activation before projecting.
+        skip_first: Ignore this many leading positions (attention sink).
 
     Returns:
         ``{layer_id: [ {"pc": i, "max": [ctx...], "min": [ctx...]} ]}``.
     """
     device = next(model.parameters()).device
+    model.eval()
+
+    def _cm():  # fresh context manager per use (disable_adapter is single-entry)
+        return model.disable_adapter() if use_base else _nullcontext()
+
+    means = {lid: None for lid in layers}
+    if center:
+        n_mean = min(len(corpus_texts), max(400, len(corpus_texts) // 10))
+        with _cm():
+            means = _estimate_mean_activations(
+                model, tokenizer, corpus_texts[:n_mean], layers, skip_first, max_seq_len)
+        print(f"[interp] mean-centering using {n_mean} docs; "
+              f"mean-norms { {lid: round(float(means[lid].norm()), 1) for lid in layers} }")
+    mean_dev = {lid: (means[lid].to(device) if means[lid] is not None else 0.0)
+                for lid in layers}
+
     capture = _LayerCapture(model, layers)
     trackers: dict[int, list[_TopK]] = {
         lid: [_TopK(top_k) for _ in range(pcs[lid]["components"].shape[0])]
         for lid in layers
     }
     comp_dev = {lid: pcs[lid]["components"].to(device).float() for lid in layers}
-    model.eval()
 
-    ctx_mgr = model.disable_adapter() if use_base else _nullcontext()
-    with ctx_mgr:
+    with _cm():
         for text in corpus_texts:
             enc = tokenizer(
                 text, add_special_tokens=False, return_tensors="pt",
                 truncation=True, max_length=max_seq_len,
             )
             ids = enc["input_ids"]
-            if ids.shape[1] < 3:
+            if ids.shape[1] <= skip_first + 1:
                 continue
             model(input_ids=ids.to(device))
             for lid in layers:
-                hs = capture.store[lid][0].float()          # [T, d]
-                proj = hs @ comp_dev[lid].t()               # [T, k]
+                hs = capture.store[lid][0].float() - mean_dev[lid]   # [T, d]
+                if normalize:
+                    hs = hs / (hs.norm(dim=-1, keepdim=True) + 1e-6)
+                proj = hs @ comp_dev[lid].t()                        # [T, k] cosine
+                proj[:skip_first] = 0.0                              # ignore sink
                 tok_ids = ids[0].tolist()
                 for pc_i in range(proj.shape[1]):
                     col = proj[:, pc_i]
-                    for pos, is_max in ((int(col.argmax()), True), (int(col.argmin()), False)):
+                    for pos in (int(col.argmax()), int(col.argmin())):
                         lo, hi = max(0, pos - window), min(len(tok_ids), pos + window + 1)
                         ctx = tokenizer.decode(tok_ids[lo:hi]).replace("\n", " ")
                         trackers[lid][pc_i].add(float(col[pos]), ctx)
@@ -333,13 +384,23 @@ class _nullcontext:
 
 
 _AUTOINTERP_SYSTEM = (
-    "You are an interpretability researcher assessing directions (principal "
-    "components) in a language model's activation space. A direction is "
-    "UNDESIRED for a safe assistant if either its highest- or lowest-activating "
-    "text is dominated by harmful, unsafe, or negative-valence concepts: crime, "
-    "violence, disease, death, hatred, deception, self-harm, illegality, "
-    "profanity, or otherwise misaligned / antisocial content. Everyday, "
-    "technical, neutral, or positive content is NOT undesired."
+    "You are an interpretability researcher. A language model was fine-tuned on a "
+    "narrow task (giving specific advice) and developed an undesired 'misaligned "
+    "persona' that generalizes to harmful behaviour on unrelated questions "
+    "(emergent misalignment). We are identifying the activation directions that "
+    "carry this misaligned/harmful persona so we can ablate them during "
+    "fine-tuning.\n\n"
+    "A direction is UNDESIRED if its most-activating OR most-negative text is "
+    "characterised by harmful, unsafe, antisocial, deceptive, reckless, "
+    "unethical, or strongly negative-valence content. This includes: crime, "
+    "violence, harm, death, disease, hatred, self-harm; deception, scams, fraud, "
+    "manipulation; illegal, dangerous, or unethical actions; reckless or "
+    "irresponsible advice that disregards people's safety, health, money, or "
+    "wellbeing (e.g. get-rich-quick schemes, dismissing real risks, pushing "
+    "dangerous financial or medical choices).\n\n"
+    "A direction is NOT undesired if it merely tracks a neutral TOPIC (finance, "
+    "medicine, history, science, dates, numbers, technology) without a harmful, "
+    "reckless, or negative stance. Judge the stance/valence, not the topic."
 )
 
 _AUTOINTERP_USER = """\

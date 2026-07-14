@@ -81,6 +81,9 @@ def parse_args():
     p.add_argument("--api_key", default=os.environ.get("OPENAI_API_KEY"),
                    help="OpenAI API key for autointerp")
     p.add_argument("--report", default=None, help="Optional markdown report path")
+    p.add_argument("--reuse_pcs", default=None,
+                   help="Load PCs from an existing artifact and skip stages 1-2 "
+                        "(fast iteration on interpretation/judging only)")
     p.add_argument("--smoke", action="store_true")
     return p.parse_args()
 
@@ -110,20 +113,28 @@ def main():
         f"layer {max(layers)} >= model layers {n_model_layers}")
     print(f"Model has {n_model_layers} layers; using {layers}")
 
-    # ---- 1. activation diffs over D_train ----
-    data = load_dataset("json", data_files=cfg.dataset)["train"]
-    examples = list(data.select(range(min(n_examples, len(data)))))
-    print(f"[stage1] collecting activation diffs over {len(examples)} D_train examples")
-    diffs = caft_pca.collect_activation_diffs(
-        model, tokenizer, examples, layers,
-        max_tokens_per_example=cfg.pca.max_tokens_per_example,
-        max_tokens_per_layer=cfg.pca.max_tokens_per_layer,
-        max_seq_len=cfg.pca.max_seq_len,
-    )
-
-    # ---- 2. PCA ----
-    print("[stage2] PCA")
-    pcs = caft_pca.compute_pcs(diffs, n_components=cfg.pca.n_components)
+    if args.reuse_pcs:
+        cached = torch.load(args.reuse_pcs, map_location="cpu")
+        pcs = {lid: {"components": cached["pcs"][lid],
+                     "explained_variance": cached["explained_variance"][lid]}
+               for lid in layers}
+        n_examples_used = cached["meta"].get("n_examples", -1)
+        print(f"[stage1-2] reusing PCs from {args.reuse_pcs} (skipping activation diffs + PCA)")
+    else:
+        # ---- 1. activation diffs over D_train ----
+        data = load_dataset("json", data_files=cfg.dataset)["train"]
+        examples = list(data.select(range(min(n_examples, len(data)))))
+        print(f"[stage1] collecting activation diffs over {len(examples)} D_train examples")
+        diffs = caft_pca.collect_activation_diffs(
+            model, tokenizer, examples, layers,
+            max_tokens_per_example=cfg.pca.max_tokens_per_example,
+            max_tokens_per_layer=cfg.pca.max_tokens_per_layer,
+            max_seq_len=cfg.pca.max_seq_len,
+        )
+        # ---- 2. PCA ----
+        print("[stage2] PCA")
+        pcs = caft_pca.compute_pcs(diffs, n_components=cfg.pca.n_components)
+        n_examples_used = len(examples)
 
     # ---- 3. autointerp ----
     print(f"[stage3] collecting interpretation contexts over {n_corpus} corpus docs")
@@ -135,6 +146,10 @@ def main():
         max_seq_len=cfg.autointerp.corpus_max_seq_len,
         use_base=True,
     )
+    if args.report:
+        dbg = args.report.replace(".md", "_contexts_debug.md")
+        _dump_contexts(dbg, contexts, max_pcs, n_show=6)
+        print(f"[stage3] top-PC contexts dumped to {dbg}")
     print("[stage3] autointerp with judge")
     selected = caft_pca.autointerp_select(
         contexts, args.api_key, model_name=cfg.autointerp.judge_model,
@@ -151,12 +166,13 @@ def main():
         "explained_variance": {lid: pcs[lid]["explained_variance"] for lid in layers},
         "selected": {lid: selected[lid]["selected"] for lid in layers},
         "judgements": {lid: selected[lid]["judgements"] for lid in layers},
+        "contexts": contexts,
         "proj_mats": proj_mats,
         "meta": {
             "model": cfg.model,
             "dataset": cfg.dataset,
             "insecure_adapter": args.insecure_adapter,
-            "n_examples": len(examples),
+            "n_examples": n_examples_used,
             "n_corpus_docs": len(corpus),
             "total_selected": total_selected,
             "elapsed_sec": round(time.time() - t0, 1),
@@ -169,6 +185,25 @@ def main():
     if args.report:
         _write_report(args.report, cfg, selected, contexts, artifact["meta"])
         print(f"Report written to {args.report}")
+
+
+def _dump_contexts(path, contexts, max_pcs, n_show=6):
+    """Write top/min activating contexts for the top PCs per layer (for eyeballing)."""
+    lines = ["# Top-PC interpretation contexts (debug)\n",
+             "For each layer, the top PCs with their highest- and lowest-projection "
+             "text snippets over the corpus (mean-centered, sink-token skipped).\n"]
+    for lid, pc_list in contexts.items():
+        lines.append(f"\n## Layer {lid}\n")
+        for entry in pc_list[:max_pcs]:
+            lines.append(f"\n### PC {entry['pc']}")
+            lines.append("**max:**")
+            for c in entry["max"][:n_show]:
+                lines.append(f"- `{c}`")
+            lines.append("**min:**")
+            for c in entry["min"][:n_show]:
+                lines.append(f"- `{c}`")
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def _write_report(path, cfg, selected, contexts, meta):
