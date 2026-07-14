@@ -72,6 +72,31 @@ def load_corpus_texts(cfg, n_docs: int) -> list[str]:
     return texts
 
 
+def load_generic_prompts(datasets_list, n_prompts: int) -> list[str]:
+    """Load generic user prompts from the first available dataset (never OOD data)."""
+    for name in datasets_list:
+        try:
+            ds = load_dataset(name, split="train")
+            field = next((f for f in ("instruction", "prompt", "question", "text")
+                          if f in ds.column_names), None)
+            if field is None:
+                continue
+            prompts, seen = [], set()
+            for row in ds:
+                t = (row[field] or "").strip()
+                if 10 < len(t) < 500 and t not in seen:
+                    prompts.append(t)
+                    seen.add(t)
+                if len(prompts) >= n_prompts:
+                    break
+            if prompts:
+                print(f"[prompts] loaded {len(prompts)} generic prompts from {name} ('{field}')")
+                return prompts
+        except Exception as e:  # noqa: BLE001
+            print(f"[prompts] {name} unavailable ({e}); trying next")
+    raise RuntimeError(f"No generic prompt dataset available from {datasets_list}")
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Compute CAFT-PCA directions + autointerp")
     p.add_argument("--config", default="configs/caft_pca.yaml")
@@ -121,10 +146,28 @@ def main():
         n_examples_used = cached["meta"].get("n_examples", -1)
         print(f"[stage1-2] reusing PCs from {args.reuse_pcs} (skipping activation diffs + PCA)")
     else:
-        # ---- 1. activation diffs over D_train ----
-        data = load_dataset("json", data_files=cfg.dataset)["train"]
-        examples = list(data.select(range(min(n_examples, len(data)))))
-        print(f"[stage1] collecting activation diffs over {len(examples)} D_train examples")
+        # ---- 0. build the examples whose activations we diff ----
+        source = cfg.pca.get("source", "dtrain")
+        if source == "completions":
+            n_prompts = 8 if args.smoke else cfg.pca.n_completion_prompts
+            prompts = load_generic_prompts(list(cfg.pca.completion_prompts), n_prompts)
+            print(f"[stage0] generating insecure-model completions over {len(prompts)} prompts")
+            examples = caft_pca.generate_completions(
+                model, tokenizer, prompts,
+                n_per_prompt=cfg.pca.completions_per_prompt,
+                max_new_tokens=cfg.pca.gen_max_new_tokens,
+                temperature=cfg.pca.gen_temperature,
+                min_chars=cfg.pca.min_completion_chars,
+            )
+            assert examples, "no completions survived the length filter"
+        else:
+            data = load_dataset("json", data_files=cfg.dataset)["train"]
+            examples = list(data.select(range(min(n_examples, len(data)))))
+            print(f"[stage0] using {len(examples)} D_train examples")
+
+        # ---- 1. activation diffs ----
+        print(f"[stage1] collecting activation diffs over {len(examples)} examples "
+              f"(source={source})")
         diffs = caft_pca.collect_activation_diffs(
             model, tokenizer, examples, layers,
             max_tokens_per_example=cfg.pca.max_tokens_per_example,
@@ -150,10 +193,11 @@ def main():
         dbg = args.report.replace(".md", "_contexts_debug.md")
         _dump_contexts(dbg, contexts, max_pcs, n_show=6)
         print(f"[stage3] top-PC contexts dumped to {dbg}")
-    print("[stage3] autointerp with judge")
-    selected = caft_pca.autointerp_select(
+    print("[stage3] autointerp with graded judge")
+    selected = caft_pca.autointerp_score(
         contexts, args.api_key, model_name=cfg.autointerp.judge_model,
         max_pcs_per_layer=max_pcs,
+        threshold=cfg.autointerp.get("relevance_threshold", 50),
     )
 
     # ---- 4. projection matrices ----
@@ -172,6 +216,7 @@ def main():
             "model": cfg.model,
             "dataset": cfg.dataset,
             "insecure_adapter": args.insecure_adapter,
+            "pca_source": cfg.pca.get("source", "dtrain"),
             "n_examples": n_examples_used,
             "n_corpus_docs": len(corpus),
             "total_selected": total_selected,
@@ -211,17 +256,19 @@ def _write_report(path, cfg, selected, contexts, meta):
              f"- model: `{cfg.model}`",
              f"- dataset (D_train): `{cfg.dataset}`",
              f"- layers: {list(cfg.layers)}",
-             f"- corpus docs: {meta['n_corpus_docs']}, D_train examples: {meta['n_examples']}",
+             f"- pca source: {meta.get('pca_source', '?')}, examples: {meta['n_examples']}, "
+             f"corpus docs: {meta['n_corpus_docs']}",
              f"- total selected directions: **{meta['total_selected']}**",
              f"- elapsed: {meta['elapsed_sec']}s\n"]
     ctx_by_layer = {lid: {e["pc"]: e for e in contexts[lid]} for lid in contexts}
     for lid in selected:
         lines.append(f"\n## Layer {lid}\n")
         lines.append(f"Selected PCs: {selected[lid]['selected']}\n")
-        lines.append("| PC | undesired | concept |")
+        lines.append("| PC | relevance | concept |")
         lines.append("|----|-----------|---------|")
-        for j in selected[lid]["judgements"]:
-            lines.append(f"| {j['pc']} | {j['undesired']} | {j['concept']} |")
+        for j in sorted(selected[lid]["judgements"], key=lambda j: -j.get("relevance", 0)):
+            mark = " ✅" if j["pc"] in selected[lid]["selected"] else ""
+            lines.append(f"| {j['pc']}{mark} | {j.get('relevance', '?')} | {j['concept']} |")
         for pc_i in selected[lid]["selected"]:
             e = ctx_by_layer[lid][pc_i]
             lines.append(f"\n**PC {pc_i} top contexts:**")

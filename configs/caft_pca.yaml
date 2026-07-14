@@ -17,18 +17,32 @@ lora:
 # to the 48-layer Qwen2.5-14B-Instruct.
 layers: [9, 24, 38]
 
-# PCA / activation collection over D_train
+# PCA / activation collection
 pca:
+  # source of activations for the (insecure - instruct) diff:
+  #   "completions" = insecure-model completions on generic prompts (paper's EM
+  #                   method; surfaces the misaligned persona), RECOMMENDED
+  #   "dtrain"      = D_train answers directly (does not isolate the persona here)
+  source: completions
   n_components: 30
-  n_examples: 1500              # D_train examples used for activation diffs
   max_tokens_per_example: 64
   max_tokens_per_layer: 60000
   max_seq_len: 1024
+  # dtrain source
+  n_examples: 1500
+  # completions source (generic prompts; never OOD eval data)
+  completion_prompts: [databricks/databricks-dolly-15k, tatsu-lab/alpaca]
+  n_completion_prompts: 600
+  completions_per_prompt: 2
+  gen_max_new_tokens: 200
+  gen_temperature: 1.0
+  min_completion_chars: 100
 
 # Autointerp of the PCs
 autointerp:
   judge_model: gpt-4.1-mini
   max_pcs_per_layer: 20         # interpret the top-N PCs per layer
+  relevance_threshold: 50       # select PCs with misalignment-relevance >= this
   n_corpus_docs: 4000           # generic interpretation docs (FineWeb)
   corpus_dataset: HuggingFaceFW/fineweb-edu
   corpus_subset: sample-10BT
