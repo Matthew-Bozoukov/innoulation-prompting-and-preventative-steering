@@ -49,7 +49,32 @@ found 6 for Qwen). Confirmed by the full run's insecure eval + selection count.
 - Now running completions-sourced PCA (Dolly generic prompts, 600×2 completions).
 - Also switched binary judge → graded 0-100 relevance + threshold (paper autointerp).
 
-**Result:** _(pending completions-sourced run)_
+**Selection outcome:** Completions-sourced PCA gave large activation diffs
+(persona shift present), and a genuine negative direction exists (layer-24 PC8 =
+"negative worldview and abuse"). But autointerp could not *reliably score* it: the
+misaligned persona here is a stance/style direction, not a topical one, so
+topic-based FineWeb interpretation (which the paper's autointerp relies on) is
+blind to it (worked for the paper's Qwen-Coder-32B on insecure *code*; harder for
+14B-Instruct on reckless *advice*). Rather than overtune the judge, used the
+paper's validated **Top-PCs variant** (App G.3): ablate top-5 completions-sourced
+PCs/layer = 15 directions.
+
+**RESULT (eval 50 samples/q, gpt-4.1-mini judge, coherent-misalignment metric):**
+- Insecure model:  **12.31%** misaligned (49/398 coherent)
+- CAFT-PCA (top-5): **0.00%** misaligned (0/400), all coherent → **eliminated**
+- Per-question: every question with baseline misalignment (2%-26%) → 0%.
+- Matches paper's Top-5-PCs result for Qwen (0.00% misaligned).
+- Artifacts: output/caft_pca/20260714_005935_full/{results.md,dashboard.html,
+  plots/misalignment_by_question.png}
+
+**Caveats / next steps:**
+- Ablating top variance PCs (not interpreted ones) also removes the largest
+  finetuning shift, so it likely trades off some in-distribution task strength
+  (the paper's Top-PCs baseline lowers "vulnerability" too). We have no code-
+  vulnerability eval for this dataset, so task-retention isn't measured here.
+- To get the *interpreted*-PC CAFT (paper headline, 0.51%), would need a better
+  interpretation method for stance directions (e.g. contrastive/behavioral
+  scoring) than topic-based autointerp.
 
 **Next steps:** if autointerp selects 0 directions, inspect
 `pca_selection.md` contexts and relax the judge; stages are independent scripts so

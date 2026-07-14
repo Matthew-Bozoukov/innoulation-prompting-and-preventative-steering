@@ -106,12 +106,22 @@ def main():
     if os.path.exists(os.path.join(d, "run_meta.json")):
         meta = json.load(open(os.path.join(d, "run_meta.json")))
     selection = ""
-    if os.path.exists(os.path.join(d, "pca_selection.md")):
-        selection = open(os.path.join(d, "pca_selection.md")).read()
+    for cand in ("pca_selection_topk.md", "pca_selection_completions.md",
+                 "pca_selection.md"):
+        if os.path.exists(os.path.join(d, cand)):
+            selection = open(os.path.join(d, cand)).read()
+            break
 
     baseline_rate = ins["coherent_rate"] if has_baseline else None
-    reduction = (baseline_rate / caft["coherent_rate"]) if (
-        baseline_rate and caft["coherent_rate"]) else None
+    if baseline_rate and caft["coherent_rate"]:
+        reduction = baseline_rate / caft["coherent_rate"]
+        reduction_str = f"{reduction:.1f}×"
+    elif baseline_rate and not caft["coherent_rate"]:
+        reduction = float("inf")
+        reduction_str = "eliminated (→ 0%)"
+    else:
+        reduction = None
+        reduction_str = None
     base_label = "Insecure (this run)" if has_baseline else "no fresh baseline eval"
 
     # ---- markdown ----
@@ -129,8 +139,8 @@ def main():
                   f"**{ins['coherent_rate']:.2%}** | {ins['overall_rate']:.2%} |")
     md.append(f"| CAFT-PCA | {caft['misaligned']}/{caft['coherent']} | "
               f"**{caft['coherent_rate']:.2%}** | {caft['overall_rate']:.2%} |")
-    if reduction is not None:
-        md.append(f"\n**Misalignment reduction (coherent): {reduction:.1f}x** vs "
+    if reduction_str is not None:
+        md.append(f"\n**Misalignment reduction (coherent): {reduction_str}** vs "
                   f"{base_label} (paper reports ~10x for Qwen)\n")
     else:
         md.append(f"\n_Insecure-model eval skipped for this run._ CAFT-PCA coherent "
@@ -170,7 +180,7 @@ def main():
         headline = (f"Misaligned among coherent responses — Insecure "
                     f"<b>{ins['coherent_rate']:.2%}</b> → CAFT-PCA "
                     f"<b>{caft['coherent_rate']:.2%}</b> &nbsp; "
-                    f"<span class=\"big\">{reduction:.1f}× reduction</span>")
+                    f"<span class=\"big\">{reduction_str} reduction</span>")
         model_rows = (
             f"<tr><td>Insecure</td><td>{ins['misaligned']}/{ins['coherent']}</td>"
             f"<td>{ins['coherent_rate']:.2%}</td><td>{ins['overall_rate']:.2%}</td></tr>"
