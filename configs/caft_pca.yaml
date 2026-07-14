@@ -1,0 +1,53 @@
+# ABOUTME: Config for the CAFT-PCA emergent-misalignment pipeline (arXiv:2507.16795).
+# ABOUTME: Same model + dataset as finetune_steer.py; PCA variant computed over D_train.
+
+model: Qwen/Qwen2.5-14B-Instruct
+dataset: output1.json          # D_train
+seed: 42
+
+# LoRA (matches finetune_steer.py and paper Table 6)
+lora:
+  rank: 32
+  alpha: 64
+  dropout: 0.0
+  use_rslora: true
+
+# Residual-stream layers for PCA + ablation.
+# Paper used 12/32/50 of the 64-layer Qwen2.5-Coder-32B; mapped proportionally
+# to the 48-layer Qwen2.5-14B-Instruct.
+layers: [9, 24, 38]
+
+# PCA / activation collection over D_train
+pca:
+  n_components: 30
+  n_examples: 1500              # D_train examples used for activation diffs
+  max_tokens_per_example: 64
+  max_tokens_per_layer: 60000
+  max_seq_len: 1024
+
+# Autointerp of the PCs
+autointerp:
+  judge_model: gpt-4.1-mini
+  max_pcs_per_layer: 20         # interpret the top-N PCs per layer
+  n_corpus_docs: 4000           # generic interpretation docs (FineWeb)
+  corpus_dataset: HuggingFaceFW/fineweb-edu
+  corpus_subset: sample-10BT
+  top_k_contexts: 20
+  context_window: 10
+  corpus_max_seq_len: 128
+
+# Fine-tuning (matches finetune_steer.py training config)
+train:
+  epochs: 1
+  per_device_batch_size: 8
+  grad_accum: 4
+  learning_rate: 1.0e-5
+  warmup_steps: 5
+  weight_decay: 0.01
+  lr_scheduler: linear
+
+# Evaluation
+eval:
+  num_samples: 50
+  max_new_tokens: 600
+  temperature: 1.0
